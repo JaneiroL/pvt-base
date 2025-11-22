@@ -235,14 +235,20 @@ def main():
     if base.is_dir():
         # CSVs (nur “rohe” OANDA-Dateien, keine eigenen Outputs)
         for p in base.glob("**/*.csv"):
-            if is_output_file(p): skipped.append((p, "Output-Datei (ignored)")); continue
-            if not is_probably_raw_oanda_csv(p): skipped.append((p, "kein OANDA-Input-Muster")); continue
+            if is_output_file(p): 
+                skipped.append((p, "Output-Datei (ignored)")); 
+                continue
+            if not is_probably_raw_oanda_csv(p): 
+                skipped.append((p, "kein OANDA-Input-Muster")); 
+                continue
             tf = infer_tf_from_name(p.name)
             if tf and tf in wanted:
                 files.append((p, tf))
         # XLSX (z. B. FX_1W_all_pairs(...).xlsx) -> alle Sheets lesen
         for p in base.glob("**/*.xlsx"):
-            if is_output_file(p): skipped.append((p, "Output-Datei (ignored)")); continue
+            if is_output_file(p): 
+                skipped.append((p, "Output-Datei (ignored)")); 
+                continue
             tf = infer_tf_from_name(p.name)
             if tf is None and "W" in wanted and re.search(r"\b1W\b|_1W|1W_", p.name.upper()):
                 tf = "W"
@@ -251,17 +257,22 @@ def main():
     else:
         if base.suffix.lower() == ".csv":
             if is_output_file(base) or not is_probably_raw_oanda_csv(base):
-                print("❌ Datei entspricht nicht dem erwarteten OANDA-CSV-Muster (', 1W_' / ', 3D_')."); sys.exit(1)
+                print("❌ Datei entspricht nicht dem erwarteten OANDA-CSV-Muster (', 1W_' / ', 3D_')."); 
+                sys.exit(1)
             tf = infer_tf_from_name(base.name)
-            if tf and tf in wanted: files.append((base, tf))
+            if tf and tf in wanted: 
+                files.append((base, tf))
         elif base.suffix.lower() in {".xlsx", ".xls"}:
             tf = infer_tf_from_name(base.name)
-            if tf is None and "W" in wanted: tf = "W"
-            if tf and tf in wanted: files.append((base, tf))
+            if tf is None and "W" in wanted: 
+                tf = "W"
+            if tf and tf in wanted: 
+                files.append((base, tf))
 
     if not files:
         print("❌ Keine passenden Dateien für die gewählten Timeframes gefunden.")
-        if skipped: print(f"(Hinweis: {len(skipped)} Elemente übersprungen)")
+        if skipped: 
+            print(f"(Hinweis: {len(skipped)} Elemente übersprungen)")
         sys.exit(1)
 
     all_results = []
@@ -284,7 +295,8 @@ def main():
                         res = detect_pivots_for_pair(pair, tf, df, start_dt, end_dt)
                         if not res.empty:
                             processed_detail.append(f"{pair} ({tf}) aus {path.name} / {sh_name}")
-                            all_results.append(res); any_ok = True
+                            all_results.append(res); 
+                            any_ok = True
                     except Exception as e:
                         skipped.append((f"{path.name} / {sh_name}", f"Fehler: {e}"))
                 if not any_ok:
@@ -294,7 +306,8 @@ def main():
 
     if not all_results:
         print("Keine Pivots im angegebenen Zeitraum/TF gefunden.")
-        if skipped: print(f"(Hinweis: {len(skipped)} Elemente übersprungen)")
+        if skipped: 
+            print(f"(Hinweis: {len(skipped)} Elemente übersprungen)")
         return
 
     out = pd.concat(all_results, ignore_index=True)
@@ -305,16 +318,36 @@ def main():
     print("\nPivot-Gap Output (Multi):")
     with pd.option_context("display.width", 120, "display.max_columns", None):
         print(show.head(40).to_string(index=False))
-        if len(show) > 40: print(f"... ({len(show)-40} weitere Zeilen)")
+        if len(show) > 40: 
+            print(f"... ({len(show)-40} weitere Zeilen)")
 
+    # ---- Neuer Output-Block: in feste Ordnerstruktur schreiben ----
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_out = Path("outputs") / "pivots"
     outputs = []
+
+    # Weekly-Pivots -> outputs/pivots/W/
     if "W" in wanted:
-        path_w = Path(f"pivots_gap_ALL_W_{stamp}.csv"); out[out["timeframe"] == "W"].to_csv(path_w, index=False); outputs.append(path_w)
+        dir_w = base_out / "W"
+        dir_w.mkdir(parents=True, exist_ok=True)
+        path_w = dir_w / f"pivots_gap_ALL_W_{stamp}.csv"
+        out[out["timeframe"] == "W"].to_csv(path_w, index=False)
+        outputs.append(path_w)
+
+    # 3D-Pivots -> outputs/pivots/3D/
     if "3D" in wanted:
-        path_3d = Path(f"pivots_gap_ALL_3D_{stamp}.csv"); out[out["timeframe"] == "3D"].to_csv(path_3d, index=False); outputs.append(path_3d)
+        dir_3d = base_out / "3D"
+        dir_3d.mkdir(parents=True, exist_ok=True)
+        path_3d = dir_3d / f"pivots_gap_ALL_3D_{stamp}.csv"
+        out[out["timeframe"] == "3D"].to_csv(path_3d, index=False)
+        outputs.append(path_3d)
+
+    # Kombinierte Datei (falls Both gewählt) -> outputs/pivots/
     if wanted == {"W","3D"}:
-        path_all = Path(f"pivots_gap_ALL_Both_{stamp}.csv"); out.to_csv(path_all, index=False); outputs.append(path_all)
+        base_out.mkdir(parents=True, exist_ok=True)
+        path_all = base_out / f"pivots_gap_ALL_Both_{stamp}.csv"
+        out.to_csv(path_all, index=False)
+        outputs.append(path_all)
 
     print("\n✅ Gespeichert:")
     for p in outputs:
