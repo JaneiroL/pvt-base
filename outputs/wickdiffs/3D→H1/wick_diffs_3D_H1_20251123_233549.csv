@@ -1,0 +1,2 @@
+pair,timeframe,pivot_type,first_candle_time,second_candle_time,chosen_price,gap_low,gap_high,first_touch_time,first_touch_price_repr,weeks_to_first_touch,days_to_first_touch
+CADJPY,3D,short,2021-10-11,2021-10-18,92.428,92.428,93.026,2021-10-25,92.4735,1.0,7.0
