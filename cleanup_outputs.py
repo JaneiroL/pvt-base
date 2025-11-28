@@ -27,10 +27,16 @@ def main() -> None:
 
     # Zielordner, die geleert werden sollen
     target_dirs = [
+        # Pivots
         base / "outputs" / "pivots" / "3D",
         base / "outputs" / "pivots" / "W",
+
+        # Wickdiffs
         base / "outputs" / "wickdiffs" / "3D→H1",
         base / "outputs" / "wickdiffs" / "W→H4",
+
+        # Trades (neuer Ordner)
+        base / "outputs" / "trades",
     ]
 
     print("🚀 Starte Cleanup der Output-Ordner...\n")
@@ -39,7 +45,7 @@ def main() -> None:
         total += clean_dir(d)
 
     print(f"\n✅ Cleanup fertig. Insgesamt gelöschte Dateien: {total}")
-    print("ℹ️ 'time frame data' und alle Rohdaten wurden NICHT angerührt.")
+    print("ℹ️ 'time frame data', 'cot data' und alle Rohdaten wurden NICHT angerührt.")
 
 
 if __name__ == "__main__":
