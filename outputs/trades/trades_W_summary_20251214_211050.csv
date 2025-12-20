@@ -1,5 +1,0 @@
-pair,n_trades,wins,losses,avg_rr,win_rate_%,avg_rr_win,avg_rr_loss
-CADJPY,3,0,3,-1.0,0.0,,-1.0
-EURCAD,1,0,1,-1.0,0.0,,-1.0
-USDCAD,2,0,2,-1.0,0.0,,-1.0
-ALL,6,0,6,-1.0,0.0,,-1.0
