@@ -137,7 +137,7 @@ def find_ltf_files_map(ltf_dir: Path) -> Dict[str, Path]:
     return mp
 
 # -----------------------------------
-# Wickdiff Loader (SUPER ROBUST FIX)
+# Wickdiff Loader (VARIANTE 3 = INSIDE big pivot)
 # -----------------------------------
 def _pick_col_generic(df: pd.DataFrame, name: str) -> str:
     low = {str(c).lower(): c for c in df.columns}
@@ -158,23 +158,20 @@ def _latest_wickdiff_csv_in_dir(d: Path) -> Optional[Path]:
     cands = []
     for p in d.glob("*.csv"):
         name = p.name.lower()
-        if ("wick" in name and "diff" in name) or ("wickdiff" in name) or ("wd" in name and "diff" in name):
+        if ("wick" in name and "diff" in name) or ("wickdiff" in name):
             cands.append(p)
     if not cands:
         return None
     return max(cands, key=lambda x: x.stat().st_mtime)
 
-def load_wickdiffs(mode: str, base: Path) -> pd.DataFrame:
+def load_wickdiffs_variant3(mode: str, base: Path) -> pd.DataFrame:
     """
-    Liest Step2-Wickdiff-Outputs (Variante 1/2/3) robust ein,
-    egal ob Spalten heißen:
-      - gap_low/gap_high
-      - pivot_low/pivot_high
-      - htf_gap_low/htf_gap_high
-      - htf_* usw.
-    Und normalisiert auf:
-      pair6, pivot_type, pivot_low/high, pivot_first/second_time, pivot_touch_time,
-      wd_first/second_time, wd_low/high
+    Variante 3: INSIDE Wickdiffs laden.
+    Ordner (wie Step2 Variante 3):
+      W  -> outputs/wickdiffs/W→H4
+      3D -> outputs/wickdiffs/3D→H1
+      2W -> outputs/wickdiffs/2W→1D
+      M  -> outputs/wickdiffs/M→3D
     """
     folder_map = {
         "W":  "W→H4",
@@ -192,9 +189,12 @@ def load_wickdiffs(mode: str, base: Path) -> pd.DataFrame:
         print(f"❌ Keine Wick-Diffs in {wd_dir} gefunden.")
         return pd.DataFrame()
 
-    print(f"🔄 Verwende Wick-Diffs ({mode}): {path}")
+    print(f"🔄 Verwende Wick-Diffs VAR3 ({mode}): {path}")
     df_raw = pd.read_csv(path)
     df_raw.columns = [str(c) for c in df_raw.columns]
+
+    pair_col = _pick_col_generic(df_raw, "pair")
+    ptype_col = _pick_col_generic(df_raw, "pivot_type")
 
     def pick_any(names: List[str]) -> str:
         for n in names:
@@ -204,60 +204,37 @@ def load_wickdiffs(mode: str, base: Path) -> pd.DataFrame:
                 pass
         raise KeyError(f"None of these columns found: {names}")
 
-    # core
-    pair_col  = pick_any(["pair", "pair6", "symbol", "instrument"])
-    ptype_col = pick_any(["pivot_type", "direction", "side"])
+    # Step2 VAR3 kann entweder gap_* oder htf_gap_* ausgeben – wir akzeptieren beides.
+    gap_low_col  = pick_any(["gap_low","htf_gap_low","pivot_low"])
+    gap_high_col = pick_any(["gap_high","htf_gap_high","pivot_high"])
 
-    # pivot price range (THIS was your crash)
-    low_col  = pick_any([
-        "pivot_low","gap_low","htf_gap_low","htf_pivot_low",
-        "weekly_gap_low","3day_gap_low","2w_gap_low","m_gap_low",
-        "htf_gap_low_price","pivot_low_price"
-    ])
-    high_col = pick_any([
-        "pivot_high","gap_high","htf_gap_high","htf_pivot_high",
-        "weekly_gap_high","3day_gap_high","2w_gap_high","m_gap_high",
-        "htf_gap_high_price","pivot_high_price"
-    ])
+    # HTF Kerzenzeiten
+    first_candle_col  = pick_any(["first_candle_time","htf_first_candle_time","pivot_first_time"])
+    second_candle_col = pick_any(["second_candle_time","htf_second_candle_time","pivot_second_time"])
 
-    # pivot times
-    first_candle_col = pick_any([
-        "pivot_first_time","first_candle_time","htf_first_candle_time",
-        "weekly_first_candle_time","3day_first_candle_time","2w_first_candle_time","m_first_candle_time"
-    ])
-    second_candle_col = pick_any([
-        "pivot_second_time","second_candle_time","htf_second_candle_time",
-        "weekly_second_candle_time","3day_second_candle_time","2w_second_candle_time","m_second_candle_time"
-    ])
+    # WD Zeiten/Preis
+    wd_first_col  = pick_any(["wd_first_candle_time","wd_first_time"])
+    wd_second_col = pick_any(["wd_second_candle_time","wd_second_time"])
+    wd_low_col    = pick_any(["wd_zone_low","wd_low"])
+    wd_high_col   = pick_any(["wd_zone_high","wd_high"])
 
-    # touch time optional
-    touch_col = None
-    for cand in [
-        "pivot_touch_time","first_touch_time","htf_first_touch_time",
-        "weekly_first_touch_time","3day_first_touch_time","2w_first_touch_time","m_first_touch_time"
-    ]:
+    # first touch (kann fehlen oder NaT sein)
+    first_touch_col = None
+    for cand in ["first_touch_time","htf_first_touch_time","pivot_touch_time"]:
         try:
-            touch_col = _pick_col_generic(df_raw, cand)
+            first_touch_col = _pick_col_generic(df_raw, cand)
             break
         except KeyError:
             continue
 
-    # wickdiff times
-    wd_first_col = pick_any(["wd_first_time","wd_first_candle_time","wd_first","wd_start_time"])
-    wd_second_col = pick_any(["wd_second_time","wd_second_candle_time","wd_second","wd_end_time"])
-
-    # wickdiff price zone
-    wd_low_col = pick_any(["wd_low","wd_zone_low","wick_diff_low","wdiff_low"])
-    wd_high_col = pick_any(["wd_high","wd_zone_high","wick_diff_high","wdiff_high"])
-
     df = pd.DataFrame({
         "pair_raw": df_raw[pair_col].astype(str),
         "pivot_type": df_raw[ptype_col].astype(str).str.lower().str.strip(),
-        "pivot_low": pd.to_numeric(df_raw[low_col], errors="coerce"),
-        "pivot_high": pd.to_numeric(df_raw[high_col], errors="coerce"),
+        "pivot_low": pd.to_numeric(df_raw[gap_low_col], errors="coerce"),
+        "pivot_high": pd.to_numeric(df_raw[gap_high_col], errors="coerce"),
         "pivot_first_time": to_naive_datetime(df_raw[first_candle_col]),
         "pivot_second_time": to_naive_datetime(df_raw[second_candle_col]),
-        "pivot_touch_time": (to_naive_datetime(df_raw[touch_col]) if touch_col else pd.NaT),
+        "pivot_touch_time": (to_naive_datetime(df_raw[first_touch_col]) if first_touch_col else pd.NaT),
         "wd_first_time": to_naive_datetime(df_raw[wd_first_col]),
         "wd_second_time": to_naive_datetime(df_raw[wd_second_col]),
         "wd_low": pd.to_numeric(df_raw[wd_low_col], errors="coerce"),
@@ -265,20 +242,15 @@ def load_wickdiffs(mode: str, base: Path) -> pd.DataFrame:
     })
     df["pair6"] = df["pair_raw"].apply(pair_code_from_str).str.upper()
 
-    # normalize orders
-    df["pivot_low"], df["pivot_high"] = df[["pivot_low","pivot_high"]].min(axis=1), df[["pivot_low","pivot_high"]].max(axis=1)
-    df["wd_low"], df["wd_high"] = df[["wd_low","wd_high"]].min(axis=1), df[["wd_low","wd_high"]].max(axis=1)
-
     df = df.dropna(subset=[
-        "pair6","pivot_type",
         "pivot_low","pivot_high","pivot_first_time","pivot_second_time",
-        "wd_low","wd_high","wd_first_time","wd_second_time"
+        "wd_low","wd_high","wd_first_time","wd_second_time",
     ]).reset_index(drop=True)
 
     return df
 
 # -----------------------------------
-# Pivot-TP-Invalidation
+# Pivot-TP-Invalidation (identisch)
 # -----------------------------------
 def compute_pivot_tp_level(pivot_low: float, pivot_high: float, direction: str) -> Optional[float]:
     pivot_low = float(pivot_low)
@@ -332,7 +304,7 @@ def pivot_invalidated_by_tp_before_wd(
     return False
 
 # -----------------------------------
-# Entry / TP SL / Simulation
+# Entry / TP SL / Simulation (identisch)
 # -----------------------------------
 def find_entry_candle(
     ltf: pd.DataFrame,
@@ -442,6 +414,7 @@ def simulate_trade(
             hit_sl = h >= sl_price
             hit_tp = l <= tp_price
 
+        # konservativ: SL gewinnt, wenn beides
         if hit_sl and hit_tp:
             return {"entry_time": ltf.iloc[entry_idx]["time"], "entry_price": entry_price,
                     "exit_time": t, "exit_price": sl_price, "result": "loss", "rr_signed": -1.0}
@@ -466,7 +439,7 @@ def run_mode(
     pivot_start: Optional[pd.Timestamp] = None,
     pivot_end: Optional[pd.Timestamp] = None,
 ) -> pd.DataFrame:
-    wd = load_wickdiffs(mode, base)
+    wd = load_wickdiffs_variant3(mode, base)
     if wd.empty:
         return pd.DataFrame()
 
@@ -487,7 +460,6 @@ def run_mode(
         print(f"❌ Keine LTF-Dateien in {ltf_dir} gefunden.")
         return pd.DataFrame()
 
-    # Modus-Laufzeitfenster
     max_days_map = {"3D": 6, "W": 14, "2W": 21, "M": 42}
     max_days = max_days_map.get(mode, 14)
 
@@ -496,7 +468,10 @@ def run_mode(
 
     wd["pivot_type"] = wd["pivot_type"].astype(str).str.lower().str.strip()
     wd = wd[wd["pivot_type"].isin({"long","short"})].copy()
-    wd = wd.sort_values(["pair6","pivot_type","pivot_first_time","pivot_second_time","wd_first_time"]).reset_index(drop=True)
+
+    wd = wd.sort_values(
+        ["pair6","pivot_type","pivot_first_time","pivot_second_time","wd_first_time"]
+    ).reset_index(drop=True)
 
     pivot_groups = wd.groupby(["pair6","pivot_type","pivot_first_time","pivot_second_time"], sort=False)
 
@@ -516,6 +491,7 @@ def run_mode(
 
         pivot_touch = g["pivot_touch_time"].dropna()
         if pivot_touch.empty:
+            # wie vorher: ohne Pivot-Touch keine Trades
             continue
         pivot_touch_time = pd.Timestamp(pivot_touch.iloc[0])
         end_time = pivot_touch_time + pd.Timedelta(days=max_days)
@@ -589,7 +565,7 @@ def run_mode(
                 "rr_signed": sim["rr_signed"],
             })
 
-            # >>> Regel: Entry = Pivot deaktiviert
+            # Regel: Entry = Pivot deaktiviert
             pivot_traded = True
 
     if skipped_pairs:
@@ -639,16 +615,16 @@ def summarize_trades(df_trades: pd.DataFrame, mode: str, out_dir: Path, stamp: s
         "avg_rr_win": avg_rr_win_tot, "avg_rr_loss": avg_rr_loss_tot
     }])], ignore_index=True)
 
-    summary_path = out_dir / f"trades_{mode}_summary_{stamp}.csv"
+    summary_path = out_dir / f"trades_{mode}_summary_VAR3_{stamp}.csv"
     summary.to_csv(summary_path, index=False)
 
-    print(f"\n===== Zusammenfassung {mode}-Trades =====")
+    print(f"\n===== Zusammenfassung {mode}-Trades (VAR3) =====")
     print(f"Gesamt: {n_tot} Trades | Wins: {wins_tot} | Losses: {losses_tot} | Win-Rate: {win_rate_tot:.1f}%")
     print(f"Ø RRR Gewinn: {avg_rr_win_tot:.3f} | Ø RRR Verlust: {avg_rr_loss_tot:.3f} | Erwartungswert: {avg_rr_tot:.3f}")
     print(f"💾 Summary gespeichert in: {summary_path.resolve()}")
 
 # -----------------------------------
-# Main – alle vier Modi in EINEN Trades-Ordner
+# Main – alle vier Modi
 # -----------------------------------
 def main() -> None:
     base = Path(__file__).resolve().parent
@@ -667,9 +643,9 @@ def main() -> None:
         trades = run_mode(base=base, mode=mode, ltf_dir=ltf_dir, ltf_label=ltf_label)
         if trades.empty:
             continue
-        path = out_base / f"trades_{mode}_{stamp}.csv"
+        path = out_base / f"trades_{mode}_VAR3_{stamp}.csv"
         trades.to_csv(path, index=False)
-        print(f"\n💾 Trades {mode} gespeichert in: {path.resolve()}")
+        print(f"\n💾 Trades {mode} (VAR3) gespeichert in: {path.resolve()}")
         summarize_trades(trades, mode, out_base, stamp)
 
 if __name__ == "__main__":

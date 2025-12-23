@@ -2,23 +2,27 @@
 # -*- coding: utf-8 -*-
 
 """
-STEP 2 (Variante 3):
-- Nimmt die HTF-Pivots (großer Pivot / gap_low..gap_high) aus outputs/pivots/<TF>
-- Sucht *innerhalb des gesamten großen Pivots* (ZEIT + PREIS) nach LTF-Wick-Differences
-- Mapping (wie gewohnt):
-    3D  -> H1
-    W   -> H4
-    2W  -> D1
-    M   -> 3D
-- Output bleibt im "Wickdiff-Format" (so wie Step2/Tradejournal es erwartet)
-  und landet in:
-    outputs/wickdiffs/3D→H1/
-    outputs/wickdiffs/W→H4/
-    outputs/wickdiffs/2W→1D/
-    outputs/wickdiffs/M→3D/
+STEP 2 (Variante 3) - FIXED:
+- Nimmt HTF-Pivots (gap_low..gap_high + first/second candle time + optional first_touch_time)
+  aus outputs/pivots/<TF>
+- Sucht LTF Wick-Differences innerhalb des *gesamten großen Pivots*:
+    ZEIT: komplette 1. + komplette 2. HTF-Candle
+    PREIS: WD-Zone muss komplett innerhalb gap_low..gap_high liegen
+- Andere Invalidation-Regeln bleiben wie Step2:
+    - Breite <= 19% der HTF Pivot-Range
+    - "Unberührt": nach WD-Entstehung keine Berührung bis HTF-touch (minus buffer) bzw. Datenende
+- Mapping:
+    3D -> H1
+    W  -> H4
+    2W -> D1
+    M  -> 3D
+- Output: wickdiff-format (kompatibel zu euren Journals)
+  outputs/wickdiffs/<sub>/
 """
 
-import argparse, sys, re
+import argparse
+import sys
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List, Tuple
@@ -27,8 +31,11 @@ import pandas as pd
 
 
 # -----------------------------------
-# Globale Einstellungen
+# Settings
 # -----------------------------------
+MAX_REL_WIDTH = 0.19  # 19% Regel
+PREVIEW_ROWS = 20
+
 PAIRS_28 = {
     "AUDCAD","AUDCHF","AUDJPY","AUDNZD","AUDUSD",
     "CADCHF","CADJPY",
@@ -41,20 +48,25 @@ PAIRS_28 = {
 
 SPECIAL_PAIR_FIX = {"OANDAG": "GBPNZD"}
 
-# Zeitfenster nach Pivot-Touch (wie bei dir in Step 3 / Tradejournal)
-MAX_DAYS_MAP = {"3D": 6, "W": 14, "2W": 21, "M": 42}
+# Buffer wie bei euren Step2 Ketten (aus V1/V2)
+BUFFER_HOURS_MAP = {"3D": 0, "W": 24, "2W": 48, "M": 96}
 
-# TF -> (Pivot-Ordner, LTF-Datenordner, Label, Wickdiff-Output-Subfolder)
+# TF -> (Pivot-Subfolder, LTF-Folder, LTF-Label, Wickdiff-Output-Subfolder)
 MODE_SPECS = {
-    "3D": ("3D",      ("time frame data" / Path("1h data")),   "H1", "3D→H1"),
-    "W":  ("W",       ("time frame data" / Path("4h data")),   "H4", "W→H4"),
-    "2W": ("2Weekly", ("time frame data" / Path("daily data")), "D1", "2W→1D"),
-    "M":  ("Monthly", ("time frame data" / Path("3D")),        "3D", "M→3D"),
+    "3D": ("3D",      Path("time frame data") / "1h data",     "H1", "3D→H1"),
+    "W":  ("W",       Path("time frame data") / "4h data",     "H4", "W→H4"),
+    "2W": ("2Weekly", Path("time frame data") / "daily data",  "D1", "2W→1D"),
+    "M":  ("Monthly", Path("time frame data") / "3D",          "3D", "M→3D"),
 }
+
 
 # -----------------------------------
 # Utils
 # -----------------------------------
+def to_dt(s) -> pd.Series:
+    # naive datetime (wie eure bisherigen Scripts)
+    return pd.to_datetime(s, errors="coerce", utc=False)
+
 def _std_cols(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
@@ -81,23 +93,24 @@ CAND_HIGH  = ["high", "h"]
 CAND_LOW   = ["low", "l"]
 CAND_CLOSE = ["close", "c"]
 
-def to_dt(s) -> pd.Series:
-    return pd.to_datetime(s, errors="coerce", utc=False)
-
 def infer_pair_from_text(txt: str) -> Optional[str]:
     up = re.sub(r"[^A-Z]", "", str(txt).upper())
+
     for bad, real in SPECIAL_PAIR_FIX.items():
         if bad in up:
             return real
+
     for p in PAIRS_28:
         if p in up:
             return p
+
     m = re.search(r"([A-Z]{6})", up)
     return m.group(1) if m else None
 
 def pair_code_from_str(s: str) -> str:
     p = infer_pair_from_text(s)
-    return (p or str(s)[:6]).upper()
+    code = (p or str(s)[:6]).upper()
+    return SPECIAL_PAIR_FIX.get(code, code)
 
 def normalize_ohlc(df: pd.DataFrame) -> pd.DataFrame:
     df = _std_cols(df)
@@ -106,9 +119,11 @@ def normalize_ohlc(df: pd.DataFrame) -> pd.DataFrame:
     h = _pick_col(df, CAND_HIGH)
     l = _pick_col(df, CAND_LOW)
     c = _pick_col(df, CAND_CLOSE)
-    out = df.rename(columns={t:"time", o:"open", h:"high", l:"low", c:"close"})[["time","open","high","low","close"]].copy()
 
-    # time parsing
+    out = df.rename(columns={t:"time", o:"open", h:"high", l:"low", c:"close"})[
+        ["time","open","high","low","close"]
+    ].copy()
+
     if pd.api.types.is_numeric_dtype(out["time"]):
         vmax = pd.Series(out["time"]).astype(float).abs().max()
         unit = "ms" if vmax > 1e12 else "s"
@@ -157,25 +172,30 @@ def candle_color(o: float, c: float) -> str:
         return "bear"
     return "doji"
 
+def any_touch_between(df: pd.DataFrame, low: float, high: float, start_time: pd.Timestamp, end_time: pd.Timestamp) -> bool:
+    seg = df[(df["time"] > start_time) & (df["time"] <= end_time)]
+    if seg.empty:
+        return False
+    lo = min(low, high)
+    hi = max(low, high)
+    return bool(((seg["high"] >= lo) & (seg["low"] <= hi)).any())
+
+def first_last_time(df: pd.DataFrame) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    return df["time"].iloc[0], df["time"].iloc[-1]
+
+
 # -----------------------------------
-# Load latest pivots CSV for a TF
+# Pivots loader (latest file)
 # -----------------------------------
 def latest_pivots_csv(pivots_dir: Path) -> Optional[Path]:
     if not pivots_dir.exists():
         return None
-    cands = []
-    for p in pivots_dir.glob("*.csv"):
-        name = p.name.lower()
-        if "pivots" in name and "gap" in name:
-            cands.append(p)
+    cands = [p for p in pivots_dir.glob("*.csv") if ("pivots" in p.name.lower() and "gap" in p.name.lower())]
     if not cands:
         return None
     return max(cands, key=lambda x: x.stat().st_mtime)
 
 def load_pivots_for_mode(base: Path, mode: str) -> pd.DataFrame:
-    if mode not in MODE_SPECS:
-        raise ValueError(f"Unknown mode {mode}")
-
     piv_subdir, _, _, _ = MODE_SPECS[mode]
     piv_dir = base / "outputs" / "pivots" / piv_subdir
     p = latest_pivots_csv(piv_dir)
@@ -187,35 +207,28 @@ def load_pivots_for_mode(base: Path, mode: str) -> pd.DataFrame:
     df = pd.read_csv(p)
     df.columns = [str(c) for c in df.columns]
 
-    # required columns (robust)
-    def pick(name: str, alts: List[str]) -> str:
+    def pick(name: str) -> str:
         low = {str(c).lower(): c for c in df.columns}
-        for a in [name] + alts:
-            a2 = a.lower()
-            if a2 in low:
-                return low[a2]
-        # contains-match
+        if name.lower() in low:
+            return low[name.lower()]
         for c in df.columns:
             if name.lower() in str(c).lower():
                 return c
         raise KeyError(name)
 
-    pair_col = pick("pair", [])
-    ptype_col = pick("pivot_type", [])
-    gap_low_col = pick("gap_low", [])
-    gap_high_col = pick("gap_high", [])
-    fc_col = pick("first_candle_time", [])
-    sc_col = pick("second_candle_time", [])
+    pair_col = pick("pair")
+    ptype_col = pick("pivot_type")
+    gap_low_col = pick("gap_low")
+    gap_high_col = pick("gap_high")
+    fc_col = pick("first_candle_time")
+    sc_col = pick("second_candle_time")
+
     ft_col = None
-    for cand in ["first_touch_time"]:
-        if cand.lower() in {str(c).lower() for c in df.columns}:
-            ft_col = pick(cand, [])
-            break
+    if "first_touch_time" in {str(c).lower() for c in df.columns}:
+        ft_col = pick("first_touch_time")
 
     out = pd.DataFrame({
-        "pair": df[pair_col].astype(str),
         "pair6": df[pair_col].astype(str).apply(pair_code_from_str),
-        "timeframe": mode,
         "pivot_type": df[ptype_col].astype(str).str.lower().str.strip(),
         "pivot_first_time": to_dt(df[fc_col]),
         "pivot_second_time": to_dt(df[sc_col]),
@@ -228,8 +241,9 @@ def load_pivots_for_mode(base: Path, mode: str) -> pd.DataFrame:
     out["pivot_low"], out["pivot_high"] = out[["pivot_low","pivot_high"]].min(axis=1), out[["pivot_low","pivot_high"]].max(axis=1)
     return out
 
+
 # -----------------------------------
-# LTF Wick-Diff detection inside a pivot (Variante 3)
+# LTF wickdiff detection inside pivot (Variante 3)
 # -----------------------------------
 def detect_ltf_wickdiffs_inside_pivot(
     ltf: pd.DataFrame,
@@ -240,12 +254,12 @@ def detect_ltf_wickdiffs_inside_pivot(
     price_high: float,
 ) -> List[Tuple[pd.Timestamp, pd.Timestamp, float, float]]:
     """
-    Findet LTF Wick-Differences (wie Pivot-Definition auf LTF):
-      long:  bear -> bull  => WD-Zone = [min(low1,low2), max(low1,low2)]
-      short: bull -> bear  => WD-Zone = [min(high1,high2), max(high1,high2)]
-    und filtert:
+    Wickdiff Definition (wie üblich):
+      long:  bear -> bull  => Zone über Lows
+      short: bull -> bear  => Zone über Highs
+    Filter:
       - Candle-Zeiten in [t_start, t_end]
-      - WD-Zone komplett innerhalb [price_low, price_high]
+      - Zone vollständig in [price_low, price_high]
     """
     if ltf.empty:
         return []
@@ -255,11 +269,11 @@ def detect_ltf_wickdiffs_inside_pivot(
         return []
 
     pl, ph = float(price_low), float(price_high)
-    out = []
+    out: List[Tuple[pd.Timestamp, pd.Timestamp, float, float]] = []
 
     for i in range(len(df) - 1):
-        o1, h1, l1, c1, t1 = df.loc[i, ["open","high","low","close","time"]]
-        o2, h2, l2, c2, t2 = df.loc[i+1, ["open","high","low","close","time"]]
+        o1, h1, l1, c1, tt1 = df.loc[i, ["open","high","low","close","time"]]
+        o2, h2, l2, c2, tt2 = df.loc[i+1, ["open","high","low","close","time"]]
         col1, col2 = candle_color(o1, c1), candle_color(o2, c2)
 
         if col1 == "doji" or col2 == "doji":
@@ -268,21 +282,21 @@ def detect_ltf_wickdiffs_inside_pivot(
         if direction == "long":
             if not (col1 == "bear" and col2 == "bull"):
                 continue
-            wd_low = float(min(l1, l2))
-            wd_high = float(max(l1, l2))
+            z_lo = float(min(l1, l2))
+            z_hi = float(max(l1, l2))
         else:
             if not (col1 == "bull" and col2 == "bear"):
                 continue
-            wd_low = float(min(h1, h2))
-            wd_high = float(max(h1, h2))
+            z_lo = float(min(h1, h2))
+            z_hi = float(max(h1, h2))
 
-        # vollständig innerhalb des großen Pivots (Variante 3)
-        if wd_low < pl or wd_high > ph:
+        if z_lo < pl or z_hi > ph:
             continue
 
-        out.append((pd.Timestamp(t1), pd.Timestamp(t2), wd_low, wd_high))
+        out.append((pd.Timestamp(tt1), pd.Timestamp(tt2), z_lo, z_hi))
 
     return out
+
 
 # -----------------------------------
 # Run per mode
@@ -292,19 +306,18 @@ def run_mode(base: Path, mode: str) -> pd.DataFrame:
     if piv.empty:
         return pd.DataFrame()
 
-    piv_subdir, ltf_rel, ltf_label, out_sub = MODE_SPECS[mode]
+    piv_subdir, ltf_rel, ltf_label, _out_sub = MODE_SPECS[mode]
     ltf_dir = base / ltf_rel
     ltf_map = find_ltf_files_map(ltf_dir)
     if not ltf_map:
         print(f"❌ Keine LTF-Dateien in {ltf_dir} gefunden.")
         return pd.DataFrame()
 
-    max_days = MAX_DAYS_MAP.get(mode, 14)
+    buffer_hours = BUFFER_HOURS_MAP.get(mode, 0)
 
-    rows = []
+    rows: List[dict] = []
     skipped_pairs = set()
 
-    # Sortierung: wie du es willst (3D->W->2W->M) passiert im main, hier egal.
     piv = piv.sort_values(["pair6","pivot_type","pivot_first_time","pivot_second_time"]).reset_index(drop=True)
 
     for _, r in piv.iterrows():
@@ -323,42 +336,81 @@ def run_mode(base: Path, mode: str) -> pd.DataFrame:
             skipped_pairs.add(pair6)
             continue
 
-        # Zeitfenster:
-        # wir nutzen pivot_touch_time, sonst fallback: pivot_second_time
-        t0 = r["pivot_touch_time"]
-        if pd.isna(t0):
-            t0 = r["pivot_second_time"]
-        t0 = pd.Timestamp(t0)
-        t1 = t0 + pd.Timedelta(days=max_days)
+        # --- ZEITFENSTER: komplette 1. + komplette 2. HTF-Candle ---
+        htf_t1 = pd.Timestamp(r["pivot_first_time"])
+        htf_t2 = pd.Timestamp(r["pivot_second_time"])
+        dur = htf_t2 - htf_t1
+        if dur <= pd.Timedelta(0):
+            continue
 
+        win_start = htf_t1
+        win_end = htf_t2 + dur  # Ende der 2. Candle (Start 3. Candle)
+
+        # --- PREISBEREICH: gesamter Pivot ---
         p_low = float(r["pivot_low"])
         p_high = float(r["pivot_high"])
+        width_w = p_high - p_low
+        if width_w <= 0:
+            continue
 
-        # LTF wickdiffs im gesamten Pivot suchen (Variante 3)
+        # LTF wickdiffs im gesamten Pivot suchen
         hits = detect_ltf_wickdiffs_inside_pivot(
             ltf=ltf_df,
             direction=direction,
-            t_start=t0,
-            t_end=t1,
+            t_start=win_start,
+            t_end=win_end,
             price_low=p_low,
             price_high=p_high,
         )
 
-        for (wd_first, wd_second, wd_low, wd_high) in hits:
+        # Für "Unberührt" brauchen wir Datenende
+        _, data_end = first_last_time(ltf_df)
+
+        # HTF touch time (falls vorhanden) als Ende-Check
+        htf_touch = r.get("pivot_touch_time", pd.NaT)
+        has_touch = pd.notna(htf_touch)
+        if has_touch:
+            touch_ts = pd.Timestamp(htf_touch)
+            buffer_end = touch_ts - pd.Timedelta(hours=buffer_hours) if buffer_hours > 0 else touch_ts
+        else:
+            buffer_end = data_end
+
+        for (wd_first, wd_second, z_lo, z_hi) in hits:
+            z_width = float(z_hi - z_lo)
+            if z_width <= 0:
+                continue
+
+            # 19%-Regel
+            if (z_width / width_w) > MAX_REL_WIDTH:
+                continue
+
+            # Unberührt: nach WD-Entstehung (wd_second) keine Touches bis buffer_end
+            wd_second_ts = pd.Timestamp(wd_second)
+            if buffer_end > wd_second_ts:
+                if any_touch_between(ltf_df, z_lo, z_hi, wd_second_ts, buffer_end):
+                    continue
+
             rows.append({
                 "pair": pair6,
+                "pivot_type": direction,
                 "timeframe": mode,
                 "ltf": ltf_label,
-                "pivot_type": direction,
-                "first_candle_time": r["pivot_first_time"],
-                "second_candle_time": r["pivot_second_time"],
-                "gap_low": p_low,
-                "gap_high": p_high,
-                "first_touch_time": r["pivot_touch_time"],
-                "wd_first_candle_time": wd_first,
-                "wd_second_candle_time": wd_second,
-                "wd_zone_low": wd_low,
-                "wd_zone_high": wd_high,
+
+                "htf_first_candle_time": htf_t1,
+                "htf_second_candle_time": htf_t2,
+                "htf_gap_low": p_low,
+                "htf_gap_high": p_high,
+                "htf_gap_width": width_w,
+
+                "wd_first_candle_time": pd.Timestamp(wd_first),
+                "wd_second_candle_time": pd.Timestamp(wd_second),
+                "wd_zone_low": float(z_lo),
+                "wd_zone_high": float(z_hi),
+                "wd_zone_width": z_width,
+                "wd_zone_pct_of_htf_gap": z_width / width_w,
+
+                "htf_first_touch_time": (pd.Timestamp(htf_touch) if has_touch else pd.NaT),
+                "pending_until_htf_touch": (not has_touch),
             })
 
     if skipped_pairs:
@@ -366,13 +418,14 @@ def run_mode(base: Path, mode: str) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
 
+
 # -----------------------------------
 # Main
 # -----------------------------------
 def parse_tf_input(s: str) -> List[str]:
     """
-    Erlaubt: W, 3D, 2W, M, Both, All + Kombis mit Komma/Space/+.
-    Rückgabe ist *sortiert* in der Reihenfolge: 3D -> W -> 2W -> M
+    Erlaubt: 3D, W, 2W, M, Both, All + Kombis.
+    Rückgabe sortiert: 3D -> W -> 2W -> M
     """
     if s is None:
         raise ValueError("Ungültige Eingabe. Erlaubt: 3D, W, 2W, M, Both, All")
@@ -430,19 +483,37 @@ def main():
     out_root = base / "outputs" / "wickdiffs"
     out_root.mkdir(parents=True, exist_ok=True)
 
-    # Reihenfolge: 3D -> W -> 2W -> M
     for mode in modes:
-        _, _, _, out_sub = MODE_SPECS[mode]
+        _piv_sub, _ltf_rel, _ltf_label, out_sub = MODE_SPECS[mode]
         df = run_mode(base, mode)
         if df.empty:
             print(f"⚠️ Keine Wickdiffs gefunden für {mode}.")
             continue
 
+        # dedup (wie in euren Step2)
+        dedup_cols = [
+            "pair","pivot_type","htf_first_candle_time","htf_second_candle_time",
+            "wd_first_candle_time","wd_second_candle_time","wd_zone_low","wd_zone_high",
+        ]
+        df = df.drop_duplicates(subset=dedup_cols, keep="first").reset_index(drop=True)
+
+        # Zeiten formatieren (Step2-like)
+        time_cols = [
+            "htf_first_candle_time","htf_second_candle_time",
+            "wd_first_candle_time","wd_second_candle_time","htf_first_touch_time",
+        ]
+        for c in time_cols:
+            df[c] = pd.to_datetime(df[c]).dt.strftime("%Y-%m-%d %H:%M")
+
         out_dir = out_root / out_sub
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / f"wickdiffs_{mode}_{stamp}.csv"
         df.to_csv(out_path, index=False)
-        print(f"💾 Wickdiffs {mode} gespeichert in: {out_path.resolve()}")
+
+        print(f"✅ Wickdiffs {mode} gespeichert: {len(df)}")
+        with pd.option_context("display.width", 240, "display.max_columns", None):
+            print(df.head(PREVIEW_ROWS).to_string(index=False))
+        print(f"💾 {out_path.resolve()}")
 
 if __name__ == "__main__":
     main()
