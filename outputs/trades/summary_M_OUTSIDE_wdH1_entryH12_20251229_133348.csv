@@ -1,0 +1,4 @@
+pair,mode,wd_variant,wd_source_ltf,entry_ltf,n_trades,wins,losses,avg_rr,win_rate_%,avg_rr_win,avg_rr_loss
+AUDUSD,M,OUTSIDE,H1,H12,2,1,1,0.08840250142127992,50.0,1.1768050028425598,-1.0
+NZDJPY,M,OUTSIDE,H1,H12,1,0,1,-1.0,0.0,,-1.0
+ALL,ALL,ALL,ALL,ALL,3,1,2,-0.2743983323858134,33.33333333333333,1.1768050028425598,-1.0

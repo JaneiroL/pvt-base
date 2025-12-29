@@ -3,9 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def clean_dir(dir_path: Path) -> int:
+def clean_dir_recursive(dir_path: Path) -> int:
     """
-    Löscht alle Dateien direkt in dir_path (keine Unterordner).
+    Löscht rekursiv alle *nicht versteckten* Dateien unterhalb von dir_path.
+    Ordner bleiben bestehen.
     Gibt die Anzahl gelöschter Dateien zurück.
     """
     if not dir_path.exists():
@@ -13,11 +14,12 @@ def clean_dir(dir_path: Path) -> int:
         return 0
 
     deleted = 0
-    for item in dir_path.iterdir():
-        if item.is_file():
+    for item in dir_path.rglob("*"):
+        if item.is_file() and not item.name.startswith("."):
             item.unlink()
             deleted += 1
-    print(f"🧹 {deleted} Dateien gelöscht in: {dir_path}")
+
+    print(f"🧹 {deleted} Dateien gelöscht unter: {dir_path}")
     return deleted
 
 
@@ -25,27 +27,15 @@ def main() -> None:
     # Projekt-Root = Ordner, in dem dieses Skript liegt
     base = Path(__file__).resolve().parent
 
-    # Zielordner, die geleert werden sollen
-    target_dirs = [
-        # Pivots
-        base / "outputs" / "pivots" / "3D",
-        base / "outputs" / "pivots" / "W",
+    # Nur der Output-Baum wird geleert
+    outputs_root = base / "outputs"
 
-        # Wickdiffs
-        base / "outputs" / "wickdiffs" / "3D→H1",
-        base / "outputs" / "wickdiffs" / "W→H4",
+    print("🚀 Starte kompletten Cleanup aller Output-Dateien...\n")
 
-        # Trades (neuer Ordner)
-        base / "outputs" / "trades",
-    ]
+    total = clean_dir_recursive(outputs_root)
 
-    print("🚀 Starte Cleanup der Output-Ordner...\n")
-    total = 0
-    for d in target_dirs:
-        total += clean_dir(d)
-
-    print(f"\n✅ Cleanup fertig. Insgesamt gelöschte Dateien: {total}")
-    print("ℹ️ 'time frame data', 'cot data' und alle Rohdaten wurden NICHT angerührt.")
+    print(f"\n✅ Cleanup fertig. Insgesamt gelöschte Dateien in 'outputs': {total}")
+    print("ℹ️ 'cot data', 'time frame data' und alle Rohdaten wurden NICHT angerührt.")
 
 
 if __name__ == "__main__":
